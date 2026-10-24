@@ -1,0 +1,341 @@
+{
+  "info": {
+    "name": "ResumeAI API",
+    "description": "Resume intelligence, live job discovery, RAG explanations and application tracking.\n\nRun the folders top to bottom (or use the Collection Runner): IDs are captured into collection variables (resumeId, jobId, applicationId) and reused by later requests.\n\nBefore running: start the API (http://localhost:5275), Ollama (llama3.2 + nomic-embed-text) and check '0. Health > Database health' is Healthy. In '1. Resumes > Upload resume', pick a PDF/DOCX/TXT file in the Body tab and save the request.\n\nOllama calls on CPU can take 20s-2min.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:5275" },
+    { "key": "resumeId", "value": "" },
+    { "key": "jobId", "value": "" },
+    { "key": "applicationId", "value": "" },
+    { "key": "resumeSkills", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "0. Health",
+      "item": [
+        {
+          "name": "API is running",
+          "request": { "method": "GET", "url": "{{baseUrl}}/" },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200 OK', () => pm.response.to.have.status(200));"
+          ] } }]
+        },
+        {
+          "name": "Database health",
+          "request": { "method": "GET", "url": "{{baseUrl}}/health", "description": "Connects to PostgreSQL and queries every resumeai table; returns row counts." },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200 Healthy', () => {",
+            "  pm.response.to.have.status(200);",
+            "  pm.expect(pm.response.json().status).to.eql('Healthy');",
+            "});",
+            "pm.test('all tables queried', () => {",
+            "  const t = pm.response.json().database.tables;",
+            "  ['resumes', 'jobs', 'chunks', 'applications'].forEach(k => pm.expect(t[k]).to.be.a('number'));",
+            "});"
+          ] } }]
+        }
+      ]
+    },
+    {
+      "name": "1. Resumes",
+      "item": [
+        {
+          "name": "Upload resume",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/api/resumes",
+            "description": "Select a PDF, DOCX or TXT file for the 'resume' field. Extracts text + structured profile (Ollama), stores it, indexes passages for RAG.",
+            "body": {
+              "mode": "formdata",
+              "formdata": [{ "key": "resume", "type": "file", "src": [] }]
+            }
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('201 Created', () => pm.response.to.have.status(201));",
+            "const body = pm.response.json();",
+            "pm.test('has id and profile', () => {",
+            "  pm.expect(body.id).to.be.a('string');",
+            "  pm.expect(body.profile.skills).to.be.an('array').that.is.not.empty;",
+            "});",
+            "pm.collectionVariables.set('resumeId', body.id);",
+            "pm.collectionVariables.set('resumeSkills', body.profile.skills.join('|'));"
+          ] } }]
+        },
+        {
+          "name": "Get resume",
+          "request": { "method": "GET", "url": "{{baseUrl}}/api/resumes/{{resumeId}}" },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200 OK', () => pm.response.to.have.status(200));",
+            "pm.test('original text stored', () => pm.expect(pm.response.json().text).to.not.be.empty);"
+          ] } }]
+        },
+        {
+          "name": "Get resume - not found",
+          "request": { "method": "GET", "url": "{{baseUrl}}/api/resumes/00000000-0000-0000-0000-000000000000" },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('404 Not Found', () => pm.response.to.have.status(404));"
+          ] } }]
+        },
+        {
+          "name": "Upload resume - no file",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/api/resumes",
+            "body": { "mode": "formdata", "formdata": [{ "key": "other", "value": "x", "type": "text" }] }
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('400 Bad Request', () => pm.response.to.have.status(400));"
+          ] } }]
+        }
+      ]
+    },
+    {
+      "name": "2. Jobs",
+      "item": [
+        {
+          "name": "Sync jobs from employer feeds",
+          "request": { "method": "POST", "url": "{{baseUrl}}/api/jobs/sync", "description": "Force an import now. First run embeds every job, so it can take a few minutes." },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200 OK', () => pm.response.to.have.status(200));",
+            "const r = pm.response.json();",
+            "pm.test('fetched jobs', () => pm.expect(r.fetched).to.be.above(0));"
+          ] } }]
+        },
+        {
+          "name": "List open jobs",
+          "request": { "method": "GET", "url": "{{baseUrl}}/api/jobs" },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200 OK', () => pm.response.to.have.status(200));",
+            "const r = pm.response.json();",
+            "pm.test('has jobs', () => pm.expect(r.count).to.be.above(0));",
+            "pm.test('no duplicate URLs', () => {",
+            "  const urls = r.jobs.map(j => j.url);",
+            "  pm.expect(new Set(urls).size).to.eql(urls.length);",
+            "});",
+            "if (!pm.collectionVariables.get('jobId') && r.jobs.length) pm.collectionVariables.set('jobId', r.jobs[0].id);"
+          ] } }]
+        },
+        {
+          "name": "Get job",
+          "request": { "method": "GET", "url": "{{baseUrl}}/api/jobs/{{jobId}}" },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200 OK', () => pm.response.to.have.status(200));"
+          ] } }]
+        }
+      ]
+    },
+    {
+      "name": "3. Matching & RAG",
+      "item": [
+        {
+          "name": "Ranked matches for resume",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/api/resumes/{{resumeId}}/matches?top=10&preferredLocation=Bangalore",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "resumes", "{{resumeId}}", "matches"],
+              "query": [
+                { "key": "top", "value": "10" },
+                { "key": "preferredLocation", "value": "Bangalore", "description": "Optional; defaults to the resume's location" }
+              ]
+            },
+            "description": "Score out of 100: skills 35 (keyword), similarity 35 (embeddings), experience 20, location 10."
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200 OK', () => pm.response.to.have.status(200));",
+            "const m = pm.response.json().matches;",
+            "pm.test('sorted by score', () => {",
+            "  for (let i = 1; i < m.length; i++) pm.expect(m[i - 1].score).to.be.at.least(m[i].score);",
+            "});",
+            "if (m.length) pm.collectionVariables.set('jobId', m[0].job.id);"
+          ] } }]
+        },
+        {
+          "name": "Explain match (RAG)",
+          "request": { "method": "GET", "url": "{{baseUrl}}/api/resumes/{{resumeId}}/matches/{{jobId}}/explain", "description": "Ollama extracts the job's required skills; code verifies each against the job text and the resume and cites the exact passage ([J#] job, [R#] resume). The summary text is written only from those verified lists." },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200 OK', () => pm.response.to.have.status(200));",
+            "const r = pm.response.json();",
+            "const ev = tag => r.evidence.find(e => e.tag === tag);",
+            "const has = (text, term) => text.toLowerCase().includes(term.toLowerCase());",
+            "pm.test('has summary, strengths/gaps and experience verdict', () => {",
+            "  pm.expect(r.text).to.not.be.empty;",
+            "  pm.expect(r.strengths).to.be.an('array');",
+            "  pm.expect(r.gaps).to.be.an('array');",
+            "  pm.expect(r.experience).to.not.be.empty;",
+            "  pm.expect(r.strengths.length + r.gaps.length).to.be.above(0);",
+            "});",
+            "pm.test('every strength is backed by the job and resume passages it cites', () => {",
+            "  r.strengths.forEach(s => {",
+            "    pm.expect(has(ev(s.jobTag).text, s.skill), `${s.skill} in ${s.jobTag}`).to.be.true;",
+            "    if (s.resumeTag) pm.expect(has(ev(s.resumeTag).text, s.skill), `${s.skill} in ${s.resumeTag}`).to.be.true;",
+            "  });",
+            "});",
+            "pm.test('every gap is a real job requirement', () => {",
+            "  r.gaps.forEach(g => pm.expect(has(ev(g.jobTag).text, g.skill), `${g.skill} in ${g.jobTag}`).to.be.true);",
+            "});",
+            "pm.test('no resume skill is reported as a gap', () => {",
+            "  const skills = (pm.collectionVariables.get('resumeSkills') || '').toLowerCase().split('|');",
+            "  r.gaps.forEach(g => pm.expect(skills, g.skill).to.not.include(g.skill.toLowerCase()));",
+            "});"
+          ] } }]
+        }
+      ]
+    },
+    {
+      "name": "4. Applications",
+      "item": [
+        {
+          "name": "Save job",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/api/applications",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"resumeId\": \"{{resumeId}}\",\n  \"jobId\": \"{{jobId}}\",\n  \"notes\": \"Top match\"\n}" }
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "const r = pm.response.json();",
+            "pm.test('201 Created (or 409 if already saved)', () => pm.expect(pm.response.code).to.be.oneOf([201, 409]));",
+            "pm.collectionVariables.set('applicationId', r.id);",
+            "if (pm.response.code === 201) pm.test('status Saved', () => pm.expect(r.status).to.eql('Saved'));"
+          ] } }]
+        },
+        {
+          "name": "Guard: submit before approval is rejected",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/api/applications/{{applicationId}}/status",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"status\": \"Submitted\"\n}" }
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('409 Conflict', () => pm.response.to.have.status(409));"
+          ] } }]
+        },
+        {
+          "name": "Generate tailored resume draft",
+          "request": { "method": "POST", "url": "{{baseUrl}}/api/applications/{{applicationId}}/draft" },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200 OK', () => pm.response.to.have.status(200));",
+            "const r = pm.response.json();",
+            "pm.test('status Drafted with draft text', () => {",
+            "  pm.expect(r.status).to.eql('Drafted');",
+            "  pm.expect(r.tailoredResume).to.not.be.empty;",
+            "});"
+          ] } }]
+        },
+        {
+          "name": "Edit draft (human review)",
+          "request": {
+            "method": "PUT",
+            "url": "{{baseUrl}}/api/applications/{{applicationId}}/draft",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"tailoredResume\": \"Edited draft text after human review.\"\n}" }
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200 OK', () => pm.response.to.have.status(200));",
+            "pm.test('still Drafted, not approved', () => {",
+            "  const r = pm.response.json();",
+            "  pm.expect(r.status).to.eql('Drafted');",
+            "  pm.expect(r.approvedAt).to.be.null;",
+            "});"
+          ] } }]
+        },
+        {
+          "name": "Approve draft",
+          "request": { "method": "POST", "url": "{{baseUrl}}/api/applications/{{applicationId}}/approve" },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200 OK', () => pm.response.to.have.status(200));",
+            "pm.test('status Approved', () => pm.expect(pm.response.json().status).to.eql('Approved'));"
+          ] } }]
+        },
+        {
+          "name": "Mark submitted (after applying via job URL)",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/api/applications/{{applicationId}}/status",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"status\": \"Submitted\",\n  \"notes\": \"Applied on employer site\"\n}" }
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200 OK', () => pm.response.to.have.status(200));",
+            "pm.test('status Submitted with timestamp', () => {",
+            "  const r = pm.response.json();",
+            "  pm.expect(r.status).to.eql('Submitted');",
+            "  pm.expect(r.submittedAt).to.not.be.null;",
+            "});"
+          ] } }]
+        },
+        {
+          "name": "Guard: draft frozen after submit",
+          "request": {
+            "method": "PUT",
+            "url": "{{baseUrl}}/api/applications/{{applicationId}}/draft",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"tailoredResume\": \"Late change\"\n}" }
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('409 Conflict', () => pm.response.to.have.status(409));"
+          ] } }]
+        },
+        {
+          "name": "Move to Interviewing",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/api/applications/{{applicationId}}/status",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"status\": \"Interviewing\",\n  \"notes\": \"Round 1 scheduled\"\n}" }
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200 OK', () => pm.response.to.have.status(200));"
+          ] } }]
+        },
+        {
+          "name": "List applications for resume",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/api/applications?resumeId={{resumeId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "applications"],
+              "query": [
+                { "key": "resumeId", "value": "{{resumeId}}" },
+                { "key": "status", "value": "Interviewing", "disabled": true }
+              ]
+            }
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200 OK', () => pm.response.to.have.status(200));",
+            "pm.test('includes job details', () => pm.expect(pm.response.json()[0].job).to.be.an('object'));"
+          ] } }]
+        },
+        {
+          "name": "Get application",
+          "request": { "method": "GET", "url": "{{baseUrl}}/api/applications/{{applicationId}}" },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200 OK', () => pm.response.to.have.status(200));"
+          ] } }]
+        }
+      ]
+    },
+    {
+      "name": "5. Legacy",
+      "item": [
+        {
+          "name": "AI ask (search criteria, no DB)",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/api/ai/ask",
+            "body": { "mode": "formdata", "formdata": [{ "key": "resume", "type": "file", "src": [] }] }
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200 OK', () => pm.response.to.have.status(200));"
+          ] } }]
+        }
+      ]
+    }
+  ]
+}
